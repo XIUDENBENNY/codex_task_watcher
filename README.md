@@ -1,6 +1,6 @@
 # codex_task_watcher
 
-✨ 让 Codex 任务完成后，在 Windows 上给你一个更顺手的提醒。
+✨ 让 Codex for cursor 任务完成后，在 Windows 上给你一个更顺手的提醒。
 
 ## 🚀 功能一览
 
