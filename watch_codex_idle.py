@@ -531,6 +531,26 @@ def list_cursor_windows() -> list[tuple[int, str]]:
     return windows
 
 
+def pick_cursor_window(workspace_dir: Path | None = None) -> tuple[int, str] | None:
+    windows = list_cursor_windows()
+    if not windows:
+        return None
+
+    project_name = workspace_dir.name.lower() if workspace_dir else Path.cwd().name.lower()
+    preferred: tuple[int, str] | None = None
+    fallback: tuple[int, str] | None = None
+
+    for hwnd, title in windows:
+        lowered = title.lower()
+        if fallback is None:
+            fallback = (hwnd, title)
+        if project_name and project_name in lowered:
+            preferred = (hwnd, title)
+            break
+
+    return preferred or fallback
+
+
 def find_cursor_command() -> list[str] | None:
     cursor_on_path = shutil.which("cursor")
     if cursor_on_path:
@@ -581,44 +601,32 @@ def open_cursor_workspace(workspace_dir: Path | None) -> bool:
 
 
 def focus_cursor(workspace_dir: Path | None = None) -> bool:
-    windows = list_cursor_windows()
-    if not windows:
-        return False
-
-    project_name = workspace_dir.name.lower() if workspace_dir else Path.cwd().name.lower()
-    preferred: tuple[int, str] | None = None
-    fallback: tuple[int, str] | None = None
-
-    for hwnd, title in windows:
-        lowered = title.lower()
-        if fallback is None:
-            fallback = (hwnd, title)
-        if project_name and project_name in lowered:
-            preferred = (hwnd, title)
-            break
-
-    target = preferred or fallback
+    target = pick_cursor_window(workspace_dir)
     if target is None:
         return False
 
-    try:
-        user32 = ctypes.windll.user32
-        hwnd = target[0]
-        user32.ShowWindow(hwnd, 9)
-        user32.SetForegroundWindow(hwnd)
-        user32.BringWindowToTop(hwnd)
-        user32.SetActiveWindow(hwnd)
-        user32.SetFocus(hwnd)
-        return True
-    except Exception:
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    hwnd, title = target
+    sw_restore = 9
+
+    def is_foreground() -> bool:
         try:
-            app_activate = f"""
+            return user32.GetForegroundWindow() == hwnd
+        except Exception:
+            return False
+
+    def app_activate() -> bool:
+        script = f"""
 $shell = New-Object -ComObject WScript.Shell
-if ($shell.AppActivate('{target[1].replace("'", "''")}')) {{ exit 0 }}
+$null = $shell.SendKeys('%')
+Start-Sleep -Milliseconds 60
+if ($shell.AppActivate('{title.replace("'", "''")}')) {{ exit 0 }}
 exit 1
 """
+        try:
             result = subprocess.run(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", app_activate],
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=3,
@@ -626,7 +634,50 @@ exit 1
             )
             return result.returncode == 0
         except Exception:
+            return False
+
+    def direct_activate() -> bool:
+        foreground_hwnd = user32.GetForegroundWindow()
+        current_thread_id = kernel32.GetCurrentThreadId()
+        foreground_thread_id = user32.GetWindowThreadProcessId(foreground_hwnd, None)
+        target_thread_id = user32.GetWindowThreadProcessId(hwnd, None)
+        attached_thread_ids: list[int] = []
+
+        try:
+            user32.ShowWindow(hwnd, sw_restore)
+            for thread_id in {foreground_thread_id, target_thread_id}:
+                if thread_id and thread_id != current_thread_id:
+                    if user32.AttachThreadInput(current_thread_id, thread_id, True):
+                        attached_thread_ids.append(thread_id)
+
+            user32.BringWindowToTop(hwnd)
+            user32.SetActiveWindow(hwnd)
+            user32.SetFocus(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            if hasattr(user32, "SwitchToThisWindow"):
+                user32.SwitchToThisWindow(hwnd, True)
+        finally:
+            for thread_id in reversed(attached_thread_ids):
+                try:
+                    user32.AttachThreadInput(current_thread_id, thread_id, False)
+                except Exception:
+                    pass
+
+        time.sleep(0.08)
+        return is_foreground()
+
+    try:
+        if is_foreground():
             return True
+        if direct_activate():
+            return True
+    except Exception:
+        pass
+
+    if app_activate():
+        time.sleep(0.08)
+        return is_foreground()
+
     return False
 
 
@@ -705,10 +756,13 @@ def render_custom_toast(
     footer.pack(fill="x")
 
     def handle_click(_event=None) -> None:
-        launched = open_cursor_workspace(workspace_dir)
-        if launched:
-            time.sleep(0.3)
-        focus_cursor(workspace_dir)
+        target_exists = pick_cursor_window(workspace_dir) is not None
+        focused = focus_cursor(workspace_dir) if target_exists else False
+        if not focused and not target_exists:
+            launched = open_cursor_workspace(workspace_dir)
+            if launched:
+                time.sleep(0.6)
+                focus_cursor(workspace_dir)
         root.destroy()
 
     for widget in (root, container, header, icon, title_label, body, message_label, footer):
