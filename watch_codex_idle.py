@@ -24,6 +24,14 @@ SETTINGS_FILE_NAME = "settings.json"
 NOTIFY_SOUND_NAME = "notify.wav"
 PRESET_SOUND_NAME = "ikunganma.aac"
 SINGLE_INSTANCE_MUTEX_NAME = "Global\\CodexTaskWatcherTraySingleton"
+NOTIFICATION_MODE_NEVER = "never"
+NOTIFICATION_MODE_UNFOCUSED = "unfocused"
+NOTIFICATION_MODE_ALWAYS = "always"
+VALID_NOTIFICATION_MODES = {
+    NOTIFICATION_MODE_NEVER,
+    NOTIFICATION_MODE_UNFOCUSED,
+    NOTIFICATION_MODE_ALWAYS,
+}
 
 
 @dataclass
@@ -51,6 +59,7 @@ class AppSettings:
     sound_enabled: bool = True
     sound_path: str | None = None
     sound_mode: str = "preset"
+    notification_mode: str = NOTIFICATION_MODE_UNFOCUSED
 
 
 def debug(enabled: bool, message: str) -> None:
@@ -100,10 +109,15 @@ def load_settings() -> AppSettings:
     sound_enabled = payload.get("sound_enabled", True)
     sound_path = payload.get("sound_path")
     sound_mode = payload.get("sound_mode")
+    notification_mode = payload.get("notification_mode", NOTIFICATION_MODE_UNFOCUSED)
     if not isinstance(sound_path, str) or not sound_path.strip():
         sound_path = None
     if sound_mode not in {"preset", "default", "custom"}:
         sound_mode = None
+    if notification_mode == "sound_only":
+        notification_mode = NOTIFICATION_MODE_NEVER
+    if notification_mode not in VALID_NOTIFICATION_MODES:
+        notification_mode = NOTIFICATION_MODE_UNFOCUSED
 
     if sound_mode is None:
         sound_mode = "custom" if sound_path else "preset"
@@ -112,6 +126,7 @@ def load_settings() -> AppSettings:
         sound_enabled=bool(sound_enabled),
         sound_path=sound_path,
         sound_mode=sound_mode,
+        notification_mode=notification_mode,
     )
 
 
@@ -129,6 +144,7 @@ def save_settings(settings: AppSettings) -> tuple[bool, str]:
                     "sound_enabled": settings.sound_enabled,
                     "sound_path": settings.sound_path,
                     "sound_mode": settings.sound_mode,
+                    "notification_mode": settings.notification_mode,
                 },
                 handle,
                 ensure_ascii=True,
@@ -151,7 +167,36 @@ def get_default_settings() -> AppSettings:
         sound_enabled=True,
         sound_path=str(preset_sound) if preset_sound.exists() else None,
         sound_mode="preset",
+        notification_mode=NOTIFICATION_MODE_UNFOCUSED,
     )
+
+
+def get_notification_mode_label(mode: str) -> str:
+    labels = {
+        NOTIFICATION_MODE_NEVER: "\u4ece\u4e0d",
+        NOTIFICATION_MODE_UNFOCUSED: "\u4ec5\u5f53 Cursor \u5931\u7126\u65f6",
+        NOTIFICATION_MODE_ALWAYS: "\u59cb\u7ec8",
+    }
+    return labels.get(mode, labels[NOTIFICATION_MODE_UNFOCUSED])
+
+
+def resolve_toast_behavior(
+    settings: AppSettings,
+    workspace_dir: Path | None,
+) -> tuple[bool, str]:
+    mode = settings.notification_mode
+    cursor_foreground = is_cursor_foreground(workspace_dir)
+
+    if mode == NOTIFICATION_MODE_NEVER:
+        return False, "never"
+
+    if mode == NOTIFICATION_MODE_ALWAYS:
+        return True, "always"
+
+    if cursor_foreground:
+        return False, "unfocused_suppressed"
+
+    return True, "unfocused"
 
 
 def parse_timestamp(value: str | None) -> float | None:
@@ -893,16 +938,19 @@ def notify(
     if window.generated_tokens > 0:
         message += f"  \u00b7  Tokens {window.generated_tokens}"
 
-    suppress_notification = is_cursor_foreground(workspace_dir)
+    should_show_toast, behavior = resolve_toast_behavior(
+        settings,
+        workspace_dir,
+    )
 
-    if settings.sound_enabled and not suppress_notification:
+    if settings.sound_enabled:
         play_notification_sound(
             wait_until_done=sound_wait_until_done,
             settings=settings,
         )
 
-    toast_state: str | bool = "suppressed" if suppress_notification else False
-    if toast_state is False:
+    toast_state: str | bool = behavior if not should_show_toast else False
+    if should_show_toast:
         shown = show_custom_toast_process(title, message, workspace_dir)
         if not shown:
             shown = show_windows_popup(title, message)
@@ -910,7 +958,8 @@ def notify(
     print(
         f"[notify] task_complete from {session_path} "
         f"(turn_id={window.turn_id or 'unknown'}, duration={duration:.1f}s, "
-        f"tokens={window.generated_tokens}, toast={toast_state})",
+        f"tokens={window.generated_tokens}, mode={settings.notification_mode}, "
+        f"behavior={behavior}, toast={toast_state})",
         flush=True,
     )
 
@@ -1243,6 +1292,22 @@ def run_tray_app(args: argparse.Namespace) -> int:
         if not success and args.debug:
             print(f"[tray] {message}", flush=True)
 
+    def notification_mode_checked(mode: str):
+        return lambda _item: load_settings().notification_mode == mode
+
+    def set_notification_mode(mode: str):
+        def handler(icon, _item) -> None:
+            settings = load_settings()
+            settings.notification_mode = mode
+            success, message = save_settings(settings)
+            if success:
+                message = f"\u8f6e\u6b21\u5b8c\u6210toast\u901a\u77e5\u5df2\u8bbe\u4e3a: {get_notification_mode_label(mode)}"
+            notify_tray(icon, message)
+            if not success and args.debug:
+                print(f"[tray] {message}", flush=True)
+
+        return handler
+
     def choose_custom_sound(icon, _item) -> None:
         selected = choose_sound_file()
         if selected is None:
@@ -1296,6 +1361,29 @@ def run_tray_app(args: argparse.Namespace) -> int:
     menu = pystray.Menu(
         pystray.MenuItem(status_text, None, enabled=False),
         pystray.MenuItem(toggle_watch_text, toggle_watch),
+        pystray.MenuItem(
+            "\u8f6e\u6b21\u5b8c\u6210toast\u901a\u77e5",
+            pystray.Menu(
+                pystray.MenuItem(
+                    "\u4ece\u4e0d",
+                    set_notification_mode(NOTIFICATION_MODE_NEVER),
+                    checked=notification_mode_checked(NOTIFICATION_MODE_NEVER),
+                    radio=True,
+                ),
+                pystray.MenuItem(
+                    "\u4ec5\u5f53 Cursor \u5931\u7126\u65f6",
+                    set_notification_mode(NOTIFICATION_MODE_UNFOCUSED),
+                    checked=notification_mode_checked(NOTIFICATION_MODE_UNFOCUSED),
+                    radio=True,
+                ),
+                pystray.MenuItem(
+                    "\u59cb\u7ec8",
+                    set_notification_mode(NOTIFICATION_MODE_ALWAYS),
+                    checked=notification_mode_checked(NOTIFICATION_MODE_ALWAYS),
+                    radio=True,
+                ),
+            ),
+        ),
         pystray.MenuItem("\u6d4b\u8bd5\u901a\u77e5", test_notify),
         pystray.MenuItem(
             "\u63d0\u793a\u97f3",

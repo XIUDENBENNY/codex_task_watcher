@@ -65,7 +65,8 @@ python watch_codex_idle.py --tray
 {
   "sound_enabled": true,
   "sound_path": null,
-  "sound_mode": "preset"
+  "sound_mode": "preset",
+  "notification_mode": "unfocused"
 }
 ```
 
