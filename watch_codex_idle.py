@@ -551,6 +551,28 @@ def pick_cursor_window(workspace_dir: Path | None = None) -> tuple[int, str] | N
     return preferred or fallback
 
 
+def is_cursor_foreground(workspace_dir: Path | None = None) -> bool:
+    if os.name != "nt":
+        return False
+
+    try:
+        foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
+    except Exception:
+        return False
+
+    if not foreground_hwnd:
+        return False
+
+    target = pick_cursor_window(workspace_dir)
+    if target is not None and foreground_hwnd == target[0]:
+        return True
+
+    for hwnd, _title in list_cursor_windows():
+        if hwnd == foreground_hwnd:
+            return True
+    return False
+
+
 def find_cursor_command() -> list[str] | None:
     cursor_on_path = shutil.which("cursor")
     if cursor_on_path:
@@ -871,19 +893,24 @@ def notify(
     if window.generated_tokens > 0:
         message += f"  \u00b7  Tokens {window.generated_tokens}"
 
-    if settings.sound_enabled:
+    suppress_notification = is_cursor_foreground(workspace_dir)
+
+    if settings.sound_enabled and not suppress_notification:
         play_notification_sound(
             wait_until_done=sound_wait_until_done,
             settings=settings,
         )
 
-    shown = show_custom_toast_process(title, message, workspace_dir)
-    if not shown:
-        shown = show_windows_popup(title, message)
+    toast_state: str | bool = "suppressed" if suppress_notification else False
+    if toast_state is False:
+        shown = show_custom_toast_process(title, message, workspace_dir)
+        if not shown:
+            shown = show_windows_popup(title, message)
+        toast_state = shown
     print(
         f"[notify] task_complete from {session_path} "
         f"(turn_id={window.turn_id or 'unknown'}, duration={duration:.1f}s, "
-        f"tokens={window.generated_tokens}, toast={shown})",
+        f"tokens={window.generated_tokens}, toast={toast_state})",
         flush=True,
     )
 
