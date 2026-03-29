@@ -775,6 +775,56 @@ def render_custom_toast(
 
 
 def choose_sound_file() -> Path | None:
+    powershell_script = r"""
+Add-Type -AssemblyName System.Windows.Forms
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = '选择提示音'
+$dialog.Filter = '音频文件|*.wav;*.aac;*.mp3;*.m4a;*.wma|所有文件|*.*'
+$dialog.Multiselect = $false
+$dialog.CheckFileExists = $true
+$dialog.RestoreDirectory = $true
+$result = $dialog.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::OK -and $dialog.FileName) {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    Write-Output $dialog.FileName
+}
+"""
+    kwargs = {
+        "args": [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-STA",
+            "-Command",
+            powershell_script,
+        ],
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.DEVNULL,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "timeout": 120,
+        "check": False,
+    }
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+    dialog_failed = False
+    try:
+        result = subprocess.run(**kwargs)
+        selected = (result.stdout or "").strip()
+        if selected:
+            return Path(selected)
+        if result.returncode == 0:
+            return None
+        dialog_failed = True
+    except Exception:
+        dialog_failed = True
+
+    if not dialog_failed:
+        return None
+
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -783,7 +833,6 @@ def choose_sound_file() -> Path | None:
 
     root = tk.Tk()
     root.withdraw()
-    root.attributes("-topmost", True)
     try:
         selected = filedialog.askopenfilename(
             title="\u9009\u62e9\u63d0\u793a\u97f3",
